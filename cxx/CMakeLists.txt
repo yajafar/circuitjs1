@@ -28,6 +28,26 @@ if(MSVC)
     if(CIRCUITJS_AVX2)
         add_compile_options(/arch:AVX2)
     endif()
+
+    # (not in TS) Whole-program and profile-guided optimization (MSVC's cl only).  /GL keeps
+    # the code in an intermediate form so the linker can optimize across files (/LTCG).  PGO
+    # then takes two links: GEN builds programs that count which branches and calls run, you
+    # run them on typical work (which writes .pgc files next to the .exe), and USE relinks
+    # using those counts to inline and lay out the hot paths.  Neither changes floating-point
+    # semantics, so results stay the same.
+    set(CIRCUITJS_PGO "OFF" CACHE STRING "OFF, LTCG (whole-program only), GEN (instrument) or USE (optimize with the profile)")
+    set_property(CACHE CIRCUITJS_PGO PROPERTY STRINGS OFF LTCG GEN USE)
+    if(NOT CIRCUITJS_PGO STREQUAL "OFF" AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        add_compile_options(/GL)
+        set(CMAKE_STATIC_LINKER_FLAGS "${CMAKE_STATIC_LINKER_FLAGS} /LTCG")
+        if(CIRCUITJS_PGO STREQUAL "GEN")
+            add_link_options(/LTCG /GENPROFILE)
+        elseif(CIRCUITJS_PGO STREQUAL "USE")
+            add_link_options(/LTCG /USEPROFILE)
+        else()
+            add_link_options(/LTCG)
+        endif()
+    endif()
 else()
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
     # JS never fuses a*b+c; doing so here makes results differ from the TS version in the last bit

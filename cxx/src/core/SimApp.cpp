@@ -82,6 +82,11 @@ void SimApp::onTimeStep() {
         scopeManager->timeStep();
 }
 
+void SimApp::collectViewedWires(std::unordered_set<CircuitElm *> &wires) {
+    if (scopeManager != nullptr)
+        scopeManager->collectViewedWires(wires);
+}
+
 bool SimApp::canDelayWireProcessing() {
     return scopeManager != nullptr && scopeManager->canDelayWireProcessing();
 }

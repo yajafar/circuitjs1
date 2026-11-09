@@ -183,6 +183,8 @@ public:
 
     // scopes can ask us to calculate wire currents once per frame instead of every step
     virtual bool canDelayWireProcessing();
+    // (not in TS) the wires whose currents something (a scope) needs every step
+    virtual void collectViewedWires(std::unordered_set<CircuitElm *> &wires);
 
     virtual void onTimeStep();
     virtual void callAnalyzeHook() {}

@@ -295,6 +295,10 @@ void CirSim::createMenus() {
     QAction *reset = simMenu->addAction(menuTitle("Reset", tr("Re&set")));
     reset->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
     connect(reset, &QAction::triggered, this, [this] { resetAction(); });
+    fastForwardAction = simMenu->addAction(LSq("Fast Forward"));
+    fastForwardAction->setCheckable(true);
+    fastForwardAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Period));
+    connect(fastForwardAction, &QAction::toggled, this, [this](bool on) { setFastForward(on); });
 
     QMenu *opts = menuBar()->addMenu(menuTitle("Options", tr("&Options")));
     // a checkbox item for flag.  The loader changes some flags, so the check marks are
@@ -720,6 +724,23 @@ void CirSim::needAnalyze() {
 
 void CirSim::repaint() {
     canvas->update();
+}
+
+void CirSim::setFastForward(bool on) {
+    if (on == fastForward)
+        return;
+    fastForward = on;
+    if (on) {
+        // runCircuit() computes until the frame's time is up (1000 / minFrameRate ms), so a low
+        // frame rate gives the simulation most of each second
+        normalMinFrameRate = minFrameRate;
+        minFrameRate = FAST_FORWARD_FRAME_RATE;
+        if (!simRunning)
+            setSimRunning(true);
+    } else
+        minFrameRate = normalMinFrameRate;
+    if (fastForwardAction && fastForwardAction->isChecked() != on)
+        fastForwardAction->setChecked(on);
 }
 
 void CirSim::setSimRunning(bool s) {
@@ -1191,7 +1212,11 @@ void CirSim::drawBottomArea(Graphics &g) {
         // measured steprate falls well short of that, the "Nx" multiplier would be misleading
         double nominalSteprate = 160 * getIterCount();
         double timerate = nominalSteprate * sim->timeStep;
-        if (timerate >= 0.1 && steprate >= nominalSteprate * 0.9)
+        if (fastForward)
+            // (not in TS) the measured rate: timesteps done in the last second times their length
+            info[0] += " (" + Locale::LS("fast forward") + " " +
+                       CircuitElm::showFormat.format((double) steprate * sim->timeStep) + "x)";
+        else if (timerate >= 0.1 && steprate >= nominalSteprate * 0.9)
             info[0] += " (" + CircuitElm::showFormat.format(timerate) + "x)";
         info[1] = Locale::LS("time step = ") + CircuitElm::getTimeText(sim->timeStep);
     }

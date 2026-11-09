@@ -20,6 +20,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 class CircuitElm;
@@ -50,6 +51,7 @@ public:
     // we need to calculate wire currents for every iteration if someone is viewing a wire in the
     // scope.  Otherwise we can do it only once per frame.
     bool canDelayWireProcessing() const;
+    void collectViewedWires(std::unordered_set<CircuitElm *> &wires) const;
     int countScopeElms() const;
     ScopeElm *getNthScopeElm(int n) const;
     void deleteUnusedScopeElms();

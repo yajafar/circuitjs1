@@ -239,6 +239,10 @@ public:
     void applySolvedRightSide(CircuitMatrix &m);
     void setNodeVoltages(CircuitMatrix &m, const std::vector<double> &nv);
     void calcWireCurrents();
+    void calcWireSegmentCurrent(WireSegment &ws);
+    // (not in TS) fast engine: the wire segments scopes need every step (see the .cpp)
+    std::vector<WireSegment *> stepWireSegments;
+    void buildStepWireSegments();
 
     double getLabeledNodeVoltage(const std::string &name);
 

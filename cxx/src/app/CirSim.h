@@ -183,6 +183,16 @@ public:
     QKeySequence runStopShortcut;
     QAction *runStopAction = nullptr;
     void setRunStopShortcut(const QKeySequence &k);
+
+    // (not in TS) Fast Forward: simulate as fast as the engine goes, redrawing only a few
+    // times a second, so drawing takes little of the time.  It ignores the speed slider and
+    // lowers the target frame rate; turning it off restores both.
+    QAction *fastForwardAction = nullptr;
+    bool fastForward = false;
+    double normalMinFrameRate = 20;
+    static constexpr double FAST_FORWARD_FRAME_RATE = 4;  // frames per second while on
+    void setFastForward(bool on);
+    double getIterCount() override { return fastForward ? 1e9 : SimApp::getIterCount(); }
     // the tool (or command) assigned to key k, or null if there is none
     QAction *findToolShortcut(const QKeySequence &k);
     // key for the command palette (Edit > Find Component/Command...); "/" by default

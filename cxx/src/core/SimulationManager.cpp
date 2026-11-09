@@ -1313,6 +1313,11 @@ void SimulationManager::runCircuit(bool didAnalyze) {
         return;
 
     bool delayWireProcessing = app->canDelayWireProcessing();
+    // (not in TS) when a scope needs wire currents every step, the fast engine works out only
+    // the wires it needs each step, and all of them once at the end (see buildStepWireSegments())
+    const bool stepWireSubset = fastEngine && !delayWireProcessing;
+    if (stepWireSubset)
+        buildStepWireSegments();
 
     long timeStepCountAtFrameStart = timeStepCount;
 
@@ -1535,7 +1540,10 @@ void SimulationManager::runCircuit(bool didAnalyze) {
         for (CircuitElm *ce : fastEngine ? stepFinishedList : elmArr)
             ce->stepFinished();
         lap(profile.stepFinished);
-        if (!delayWireProcessing)
+        if (stepWireSubset) {
+            for (WireSegment *ws : stepWireSegments)
+                calcWireSegmentCurrent(*ws);
+        } else if (!delayWireProcessing)
             calcWireCurrents();
         lap(profile.wireCurrents);
         app->onTimeStep();
@@ -1559,7 +1567,7 @@ void SimulationManager::runCircuit(bool didAnalyze) {
     }
     lastIterTime = lit;
     lap(profile.other);
-    if (delayWireProcessing)
+    if (delayWireProcessing || stepWireSubset)
         calcWireCurrents();
     lap(profile.wireCurrents);
 }
@@ -1600,33 +1608,75 @@ void SimulationManager::setNodeVoltages(CircuitMatrix &m, const std::vector<doub
 // we removed wires from the matrix to speed things up.  in order to display wire currents,
 // we need to calculate them now.
 void SimulationManager::calcWireCurrents() {
-    for (auto &wsp : wireInfoList) {
-        WireSegment &ws = *wsp;
-        double cur = 0;
+    for (auto &wsp : wireInfoList)
+        calcWireSegmentCurrent(*wsp);
+}
 
-        if (ws.post == 0) {
-            // resolve from endpoint0 (position-based neighbors)
-            Point p = ws.wire->getPost(ws.bit);
+// (not in TS) The fast engine's per-step wire list.  Wire currents are only for display, and
+// during a frame only scopes showing wires need them every step (that's what
+// canDelayWireProcessing() checks); so each step works out just those wires' segments, plus
+// every segment they depend on (wire neighbors set earlier in the list, label-linked
+// segments), in list order, and runCircuit() does all of them once at the end, for drawing.
+// The watched wires get exactly the values the full pass would give.
+void SimulationManager::buildStepWireSegments() {
+    stepWireSegments.clear();
+    std::unordered_set<CircuitElm *> viewed;
+    app->collectViewedWires(viewed);
+    if (viewed.empty())
+        return;
+    std::unordered_map<CircuitElm *, std::vector<WireSegment *>> segmentsOf;
+    for (auto &wsp : wireInfoList)
+        segmentsOf[wsp->wire].push_back(wsp.get());
+    std::unordered_set<WireSegment *> needed;
+    std::vector<WireSegment *> stack;
+    for (CircuitElm *w : viewed) {
+        auto it = segmentsOf.find(w);
+        if (it != segmentsOf.end())
+            stack.insert(stack.end(), it->second.begin(), it->second.end());
+    }
+    while (!stack.empty()) {
+        WireSegment *s = stack.back();
+        stack.pop_back();
+        if (!needed.insert(s).second)
+            continue;
+        for (CircuitElm *ce : s->neighbors) {
+            auto it = segmentsOf.find(ce);
+            if (it != segmentsOf.end())
+                stack.insert(stack.end(), it->second.begin(), it->second.end());
+        }
+        for (WireSegment *ln : s->labelNeighbors)
+            stack.push_back(ln);
+    }
+    for (auto &wsp : wireInfoList)
+        if (needed.count(wsp.get()))
+            stepWireSegments.push_back(wsp.get());
+}
+
+void SimulationManager::calcWireSegmentCurrent(WireSegment &ws) {
+    double cur = 0;
+
+    if (ws.post == 0) {
+        // resolve from endpoint0 (position-based neighbors)
+        Point p = ws.wire->getPost(ws.bit);
+        for (CircuitElm *ce : ws.neighbors)
+            cur += ce->getCurrentIntoNode(ce->getNodeAtPoint(p));
+    } else {
+        if (ws.endpoint1 && startsWith(*ws.endpoint1, "label:")) {
+            // label neighbors: use their already-computed current
+            for (WireSegment *ln : ws.labelNeighbors)
+                cur += ln->current;
+        } else {
+            // position-based neighbors at endpoint1
+            Point p = *ws.wire->getConnectedPost(ws.bit);
             for (CircuitElm *ce : ws.neighbors)
                 cur += ce->getCurrentIntoNode(ce->getNodeAtPoint(p));
-        } else {
-            if (ws.endpoint1 && startsWith(*ws.endpoint1, "label:")) {
-                // label neighbors: use their already-computed current
-                for (WireSegment *ln : ws.labelNeighbors)
-                    cur += ln->current;
-            } else {
-                // position-based neighbors at endpoint1
-                Point p = *ws.wire->getConnectedPost(ws.bit);
-                for (CircuitElm *ce : ws.neighbors)
-                    cur += ce->getCurrentIntoNode(ce->getNodeAtPoint(p));
-            }
         }
-        // get correct current polarity
-        if (ws.post != 0)
-            cur = -cur;
-        ws.wire->setWireCurrent(ws.bit, cur);
-        ws.current = cur;
     }
+    // get correct current polarity
+    if (ws.post != 0)
+        cur = -cur;
+    ws.wire->setWireCurrent(ws.bit, cur);
+    ws.current = cur;
 }
 
 void SimulationManager::invertMatrix(std::vector<std::vector<double>> &a, int n) {

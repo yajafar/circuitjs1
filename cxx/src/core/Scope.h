@@ -220,6 +220,7 @@ public:
     CircuitElm *getElm() const;
     bool showingElm(const CircuitElm *e) const;
     bool viewingWire() const;
+    void addViewedWires(std::unordered_set<CircuitElm *> &wires) const;
     // Populate roles with all elements involved in this scope's display
     // Populate roles map with all elements involved in this scope's display.
     // In XY mode each element is labelled by its axis role; in normal mode all

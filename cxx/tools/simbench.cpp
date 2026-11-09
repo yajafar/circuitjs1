@@ -24,6 +24,7 @@
 //                             [--verbose] [--profile] [--blame]
 //
 //   --seconds S   simulated seconds to run (default 1)
+//   --steps N     stop after N timesteps, whichever comes first (for circuits with tiny timesteps)
 //   --frame-steps N  timesteps per runCircuit() call, i.e. per GUI frame (default 1000).  Like
 //                 the app, the engine works out wire currents (for drawing) once per frame when
 //                 no scope needs them every step.  1 reproduces simtrace's one step per call.
@@ -35,6 +36,9 @@
 //   --blame       list the elements that most often report "not converged yet"
 //   --elements    time doStep() per element class (adds ~20 cycles per call)
 //   --dense-lu    use only DenseLU's dense path (to compare it with the sparse one)
+//   --wires-every-step  work out wire currents every step, as a scope showing a wire makes the app do
+//   --watch-wires N  pretend scopes watch every Nth wire; prints a hash of their currents at every
+//                 step (equal for --engine ref and fast)
 
 #include <algorithm>
 #include <chrono>
@@ -47,6 +51,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "core/CircuitElm.h"
@@ -73,8 +78,27 @@ public:
     double currentTimeMillis() override { return clockMs; }
     double randomDouble() override { return 0.5; }
     int randomInt() override { return 0; }
-    // no scopes here, so nothing needs wire currents every step
-    bool canDelayWireProcessing() override { return true; }
+    // There are no scopes here, so wire currents (needed only for drawing) are worked out once
+    // per frame, unless --wires-every-step asks for what a scope showing a wire causes in the app,
+    // or --watch-wires pretends scopes watch some wires (whose currents are then hashed every step).
+    bool wiresEveryStep = false;
+    std::vector<CircuitElm *> watched;
+    uint64_t watchHash = 1469598103934665603ull;  // FNV-1a offset basis
+    bool canDelayWireProcessing() override { return !wiresEveryStep && watched.empty(); }
+    void collectViewedWires(std::unordered_set<CircuitElm *> &wires) override {
+        wires.insert(watched.begin(), watched.end());
+    }
+    void onTimeStep() override {
+        // FNV-1a over the bits of each watched wire's current: equal hashes mean every value at
+        // every step was bit-identical
+        for (CircuitElm *w : watched) {
+            double c = w->getCurrent();
+            unsigned char bytes[sizeof c];
+            std::memcpy(bytes, &c, sizeof c);
+            for (unsigned char b : bytes)
+                watchHash = (watchHash ^ b) * 1099511628211ull;
+        }
+    }
     void startFrame() {
         clockMs += 1;
         lastFrameTime = clockMs;
@@ -139,11 +163,16 @@ int main(int argc, char **argv) {
         return 1;
     }
     double seconds = 1;
+    long maxSteps = 0;  // --steps N; 0 = no limit
     bool refEngine = false, quiet = false, verbose = false, profile = false, blame = false, elements = false;
+    bool wiresEveryStep = false;
+    int watchEvery = 0;  // --watch-wires N: watch every Nth wire-equivalent element
     int frameSteps = 1000;
     for (int i = 2; i < argc; i++) {
         if (!std::strcmp(argv[i], "--seconds") && i + 1 < argc)
             seconds = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--steps") && i + 1 < argc)
+            maxSteps = std::atol(argv[++i]);
         else if (!std::strcmp(argv[i], "--frame-steps") && i + 1 < argc)
             frameSteps = std::max(1, std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--engine") && i + 1 < argc)
@@ -160,6 +189,10 @@ int main(int argc, char **argv) {
             elements = true;
         else if (!std::strcmp(argv[i], "--dense-lu"))
             DenseLU::sparseEnabled = false;  // fast engine with only the dense LU path
+        else if (!std::strcmp(argv[i], "--wires-every-step"))
+            wiresEveryStep = true;
+        else if (!std::strcmp(argv[i], "--watch-wires") && i + 1 < argc)
+            watchEvery = std::max(1, std::atoi(argv[++i]));
         else {
             std::fprintf(stderr, "unknown option %s\n", argv[i]);
             return 1;
@@ -194,6 +227,7 @@ int main(int argc, char **argv) {
     registerElements();
     sim.fastEngine = !refEngine;
     app.frameSteps = frameSteps;
+    app.wiresEveryStep = wiresEveryStep;
 
     CircuitLoader loader(&app, &sim);
     loader.readCircuit(text.str());
@@ -202,6 +236,12 @@ int main(int argc, char **argv) {
     sim.lastIterTime = app.clockMs;  // so the first runCircuit() call doesn't just initialize the clock
     sim.analyzeCircuit();
     sim.preStampAndStampCircuit();
+    if (watchEvery > 0) {
+        int k = 0;
+        for (CircuitElm *ce : app.elmList)
+            if (ce->isWireEquivalent() && k++ % watchEvery == 0)
+                app.watched.push_back(ce);
+    }
     if (app.stopMessage) {
         std::printf("stopped before running: %s\n", app.stopMessage->c_str());
         return 1;
@@ -232,11 +272,17 @@ int main(int argc, char **argv) {
     uint64_t startTicks = cycleCount();
     auto start = std::chrono::steady_clock::now();
     auto wall = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); };
-    while (sim.t < seconds) {
+    while (sim.t < seconds && (maxSteps == 0 || app.steps - stepsAtStart < maxSteps)) {
         app.startFrame();
+        const long stepsBefore = app.steps;
         sim.runCircuit(true);
         if (app.stopMessage) {
             std::printf("stopped at t=%.6f s: %s\n", sim.t, app.stopMessage->c_str());
+            break;
+        }
+        if (app.steps == stepsBefore) {
+            // an empty circuit (or one that can't run) never advances time
+            std::printf("stopped at t=%.6f s: no progress\n", sim.t);
             break;
         }
         if (!displays.empty() && !quiet) {
@@ -265,9 +311,16 @@ int main(int argc, char **argv) {
         std::printf("LU per step: %.2f sparse full, %.2f sparse replays (%.3f pivot mismatches), %.2f dense\n",
                     (double) c.sparseFull / (double) steps, (double) c.sparseRefactor / (double) steps,
                     (double) c.mismatches / (double) steps, (double) c.dense / (double) steps);
+        const int64_t cols = c.columnsSkipped + c.columnsReplayed;
+        if (cols > 0)
+            std::printf("replays: %.1f%% of columns unchanged and skipped\n",
+                        100.0 * (double) c.columnsSkipped / (double) cols);
     }
     if (!displays.empty())
         std::printf("final display: %s\n", shown.c_str());
+    if (watchEvery > 0)
+        std::printf("watched %zu wires; hash of their currents at every step: %016llx\n", app.watched.size(),
+                    (unsigned long long) app.watchHash);
 
     if (profile) {
         const SimulationManager::Profile &p = sim.profile;

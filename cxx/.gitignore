@@ -2,3 +2,5 @@ build-mac/
 tools/node_modules/
 build-win/
 build-clang/
+build-ltcg/
+build-pgo/

@@ -62,9 +62,15 @@ int main(int argc, char **argv) {
         app.scheduleScreenshot(args[shot + 1], frames);
         args.remove(shot, 2);
     }
+    // (not in TS) --fast-forward: start in Fast Forward mode (Simulation menu)
+    int ff = args.indexOf("--fast-forward");
+    if (ff >= 0)
+        args.remove(ff);
     if (!args.isEmpty())
         app.loadFile(args[0]);
     else
         app.loadDefaultCircuit();
+    if (ff >= 0)
+        app.setFastForward(true);
     return qapp.exec();
 }

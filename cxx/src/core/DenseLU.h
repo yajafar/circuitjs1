@@ -50,6 +50,8 @@ public:
         int64_t sparseFull = 0;      // sparse, structure found from scratch
         int64_t sparseRefactor = 0;  // sparse, recorded structure replayed
         int64_t mismatches = 0;      // replays that found a different pivot (then done in full)
+        int64_t columnsSkipped = 0;  // replayed columns left as they were (input unchanged)
+        int64_t columnsReplayed = 0; // replayed columns recomputed
         int64_t dense = 0;           // dense path
     };
     static inline Counts counts;
@@ -139,10 +141,10 @@ private:
     std::vector<int> touched, reach, stack, nextSlot;
     std::vector<double> scratch;  // solve()'s permuted right side
 
-    bool sameAsInput(const std::vector<std::vector<double>> &a) const;
+    int firstChangedColumn(const std::vector<std::vector<double>> &a) const;
     void groupByColumn();
     SparseResult factorSparse();
-    SparseResult sparseRefactor();
+    SparseResult sparseRefactor(int startCol);
     bool factorDense();
     void ensureDense();
     void solveSparse(std::vector<double> &b);

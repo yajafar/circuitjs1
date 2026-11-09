@@ -81,16 +81,19 @@ inline bool anyNonFinite(const double *x, int count) {
 // Input
 // ---------------------------------------------------------------------------------------------
 
-// Only the stamped entries can differ from last time (every other entry is +0.0 both times).
-bool DenseLU::sameAsInput(const std::vector<std::vector<double>> &a) const {
+// The first column whose entries differ from the input of the last factorization: n if none
+// does (the factors can be reused as they are), 0 if there is nothing to compare with.  Only
+// the stamped entries can differ (every other entry is +0.0 both times).
+int DenseLU::firstChangedColumn(const std::vector<std::vector<double>> &a) const {
     if (!haveFactors || stampRow.size() != inputValues.size())
-        return false;
+        return 0;
+    int first = n;
     for (size_t p = 0; p < stampRow.size(); p++)
         // compare bit patterns, not values: -0.0 == 0.0 but they can factor differently,
         // and NaN != NaN (a NaN matrix never gets this far anyway)
-        if (std::memcmp(&a[stampRow[p]][stampCol[p]], &inputValues[p], sizeof(double)) != 0)
-            return false;
-    return true;
+        if (stampCol[p] < first && std::memcmp(&a[stampRow[p]][stampCol[p]], &inputValues[p], sizeof(double)) != 0)
+            first = stampCol[p];
+    return first;
 }
 
 // Group the stamped entries by column (a counting sort), for factorSparse().  Only needed when
@@ -123,13 +126,18 @@ bool DenseLU::factor(const std::vector<std::vector<double>> &a, int size, const 
         stampRow.push_back(stamped[p] % N);
         stampCol.push_back(stamped[p] / N);
     }
-    if (sameAsInput(a)) {
+    const int firstChanged = firstChangedColumn(a);
+    if (firstChanged == N) {
         lastReused = true;
         return true;
     }
+    // Left-looking factorization builds column j from input column j and columns 0..j-1 only.
+    // So if the last factorization was a successful sparse one, its columns before firstChanged
+    // are exactly what they'd be now, and a replay can start at firstChanged.
+    const int replayFrom = sparseValid ? firstChanged : 0;
     haveFactors = sparseValid = denseValid = false;
 
-    // read the stamped entries, keeping their values for the next sameAsInput() and noting
+    // read the stamped entries, keeping their values for the next firstChangedColumn() and noting
     // which rows have a nonzero entry and whether anything is -0.0, inf or NaN
     rowHasNonzero.assign(N, 0);
     inputValues.resize(stampRow.size());
@@ -152,7 +160,7 @@ bool DenseLU::factor(const std::vector<std::vector<double>> &a, int size, const 
         // replay the recorded structure if it's for this stamped pattern; else find it
         SparseResult r = SparseResult::Mismatch;
         if (symbolicValid && symbolicCount == stampRow.size())
-            r = sparseRefactor();
+            r = sparseRefactor(replayFrom);
         if (r == SparseResult::Mismatch)
             r = factorSparse();
         if (r == SparseResult::Done) {
@@ -390,11 +398,26 @@ DenseLU::SparseResult DenseLU::factorSparse() {
 // search, no sorting, no allocation.  Each column's pivot is chosen by the same rule as before
 // and compared with the recorded one; if it differs, the rest of the structure doesn't apply
 // and the caller does the full factorization.
-DenseLU::SparseResult DenseLU::sparseRefactor() {
+//
+// Columns before startCol are known to be unchanged from the last factorization (see factor()),
+// so only their row swaps are redone, to bring rowAt[]/posOf[] to where they were at startCol.
+DenseLU::SparseResult DenseLU::sparseRefactor(int startCol) {
     const int N = n;
     counts.sparseRefactor++;
+    counts.columnsSkipped += startCol;
+    counts.columnsReplayed += N - startCol;
     for (int i = 0; i < N; i++)
         rowAt[i] = posOf[i] = i;
+    for (int j = 0; j < startCol; j++) {
+        const int bestPos = ipvt[j];
+        if (bestPos != j) {
+            const int best = rowAt[bestPos], displaced = rowAt[j];
+            rowAt[j] = best;
+            rowAt[bestPos] = displaced;
+            posOf[best] = j;
+            posOf[displaced] = bestPos;
+        }
+    }
     double *const w = work.data();  // all zero between columns
 
     // the rows column j touched: its L rows, its pivot row and the rows of its U entries
@@ -406,7 +429,7 @@ DenseLU::SparseResult DenseLU::sparseRefactor() {
             w[rowAt[reachPos[e]]] = 0.0;
     };
 
-    for (int j = 0; j < N; j++) {
+    for (int j = startCol; j < N; j++) {
         for (int q = colStart[j]; q < colStart[j + 1]; q++) {
             const int p = colEntry[q];
             w[stampRow[p]] = inputValues[p];

@@ -125,6 +125,16 @@ bool ScopeManager::canDelayWireProcessing() const {
     return true;
 }
 
+// (not in TS) the wires whose currents the scopes need every step: the ones
+// canDelayWireProcessing() looks for, docked or undocked
+void ScopeManager::collectViewedWires(std::unordered_set<CircuitElm *> &wires) const {
+    for (int i = 0; i != scopeCount; i++)
+        scopes[i]->addViewedWires(wires);
+    for (CircuitElm *ce : sim->elmList)
+        if (ce->isScopeElm() && static_cast<ScopeElm *>(ce)->elmScope != nullptr)
+            static_cast<ScopeElm *>(ce)->elmScope->addViewedWires(wires);
+}
+
 int ScopeManager::countScopeElms() const {
     int c = 0;
     for (CircuitElm *ce : sim->elmList)

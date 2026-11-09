@@ -1229,6 +1229,13 @@ bool Scope::viewingWire() const {
     return false;
 }
 
+// (not in TS) the wire-equivalent elements this scope plots (see viewingWire())
+void Scope::addViewedWires(std::unordered_set<CircuitElm *> &wires) const {
+    for (auto &p : plots)
+        if (p->elm != nullptr && p->elm->isWireEquivalent())
+            wires.insert(p->elm);
+}
+
 void Scope::addScopePlotRoles(std::unordered_map<CircuitElm *, std::string> &roles) const {
     if (plot2d.plotXY) {
         addPlotRole(roles, plot2d.plotX,          "X");
