@@ -22,6 +22,7 @@
 #include <cmath>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "CircuitNode.h"
@@ -43,9 +44,20 @@ class CircuitXMLDeserializer;
 struct WireSegment;
 class WireRouter;
 
-// every concrete element class puts this in its body; it stands in for constructor.name
+// every concrete element class puts this in its body; it stands in for constructor.name.
+// (not in TS) It also reports which per-timestep hooks the class overrides; see elmHooks().
 #define ELM_CLASS(name) \
-    std::string getClassName() const override { return #name; }
+    std::string getClassName() const override { return #name; } \
+    unsigned overriddenHooks() const override { return elmHooks<name>(); }
+
+// (not in TS) bits for CircuitElm::overriddenHooks()
+enum : unsigned {
+    HOOK_DO_STEP = 1,
+    HOOK_START_ITERATION = 2,
+    HOOK_STEP_FINISHED = 4,
+    HOOK_CALCULATE_CURRENT = 8,
+    HOOK_ALL = 15,
+};
 
 // circuit element class
 class CircuitElm : public Editable {
@@ -128,6 +140,10 @@ public:
     static void setColorScale();
 
     virtual std::string getClassName() const = 0;
+    // (not in TS) which of doStep(), startIteration(), stepFinished() and calculateCurrent()
+    // this class overrides (HOOK_* bits); the rest are CircuitElm's empty versions, which the
+    // fast engine doesn't need to call.  ELM_CLASS fills it in; a class without it says "all".
+    virtual unsigned overriddenHooks() const { return HOOK_ALL; }
     virtual int getDumpType() { return 0; }
     virtual std::string getXmlDumpType();
     // class name to register this element's dump type under (DCVoltageElm uses VoltageElm's)
@@ -479,3 +495,23 @@ public:
     // Returns true if (px,py) lies strictly inside the axis-aligned segment (ax,ay)-(bx,by).
     static bool pointOnSegmentInterior(int ax, int ay, int bx, int by, int px, int py);
 };
+
+// (not in TS) Which per-timestep hooks class T overrides, worked out at compile time.
+//
+// &T::doStep names the doStep that name lookup finds in T, and its type says which class
+// declared it: void (CircuitElm::*)() if no class between CircuitElm and T overrides it,
+// void (X::*)() if X does.  So the test is exact, including overrides in intermediate classes.
+template <class T>
+unsigned elmHooks() {
+    using Hook = void (CircuitElm::*)();
+    unsigned h = 0;
+    if (!std::is_same_v<decltype(&T::doStep), Hook>)
+        h |= HOOK_DO_STEP;
+    if (!std::is_same_v<decltype(&T::startIteration), Hook>)
+        h |= HOOK_START_ITERATION;
+    if (!std::is_same_v<decltype(&T::stepFinished), Hook>)
+        h |= HOOK_STEP_FINISHED;
+    if (!std::is_same_v<decltype(&T::calculateCurrent), Hook>)
+        h |= HOOK_CALCULATE_CURRENT;
+    return h;
+}

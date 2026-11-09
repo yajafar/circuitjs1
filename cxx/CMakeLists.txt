@@ -14,6 +14,20 @@ endif()
 if(MSVC)
     add_compile_options(/W3 /utf-8 /fp:precise)
     add_compile_definitions(_USE_MATH_DEFINES NOMINMAX)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        # clang-cl: /fp:precise still lets clang fuse a*b+c into FMA instructions when the
+        # target has them (AVX2 does), which JS never does
+        add_compile_options(/clang:-ffp-contract=off)
+    endif()
+    # (not in TS) AVX2: 4 doubles per SIMD instruction instead of SSE2's 2.  Any x86-64 CPU
+    # from 2013 (Intel Haswell) or 2015 (AMD Excavator) on has it.  MSVC doesn't fuse a*b+c
+    # into FMA under /fp:precise unless asked (/fp:contract), so results don't change.
+    # Off by default: measured no gain on the digital clock (its matrix loops are too short
+    # for wider SIMD to matter), and an AVX2 build won't start on older CPUs.
+    option(CIRCUITJS_AVX2 "compile for AVX2 CPUs" OFF)
+    if(CIRCUITJS_AVX2)
+        add_compile_options(/arch:AVX2)
+    endif()
 else()
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
     # JS never fuses a*b+c; doing so here makes results differ from the TS version in the last bit
@@ -36,6 +50,12 @@ target_include_directories(circuitcore PUBLIC src)
 # headless trace tool, compared against tools/simtrace.ts by tools/compare.py
 add_executable(simtrace tools/simtrace.cpp)
 target_link_libraries(simtrace circuitcore)
+# DenseLU stress test against the reference lu_factor_dense()/lu_solve_dense(), bit for bit
+add_executable(lutest tools/lutest.cpp)
+target_link_libraries(lutest circuitcore)
+# headless benchmark: simulated seconds per wall second, plus 7-segment display readout
+add_executable(simbench tools/simbench.cpp)
+target_link_libraries(simbench circuitcore)
 add_executable(exprtest tools/exprtest.cpp)
 target_link_libraries(exprtest circuitcore)
 

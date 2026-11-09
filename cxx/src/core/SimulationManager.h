@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -84,6 +85,9 @@ public:
     // mapping from elements to connected routed wires
     std::unordered_map<CircuitElm *, std::vector<RoutedWireConnection>> routedWireMap;
     std::vector<CircuitElm *> elmArr;
+    // (not in TS) fast engine: the elements of elmArr, in the same order, whose doStep(),
+    // startIteration() or stepFinished() isn't CircuitElm's empty one (see elmHooks())
+    std::vector<CircuitElm *> doStepList, startIterationList, stepFinishedList;
     double t = 0;
 
     // Solver type: 0=Auto, 1=Dense, 2=Sparse
@@ -108,6 +112,48 @@ public:
 
     bool converged = false;
     int subIterations = 0;
+
+    // (not in TS) true: the optimized engine.  false: the reference engine, which follows the
+    // original algorithm step for step, so its results match the TypeScript version bit for bit
+    bool fastEngine = true;
+
+    // (not in TS) work counters, for benchmarks; reset them with stats = {}
+    struct Stats {
+        // int64_t, not long: long is only 32 bits on Windows, and long runs overflow it
+        int64_t subIterations = 0;  // Newton sub-iterations, summed over timesteps
+        int64_t factors = 0;        // LU factorizations
+        int64_t factorsReused = 0;  // of those, how many reused unchanged factors (DenseLU)
+        int64_t solves = 0;         // LU forward/back substitutions
+        int64_t solvesSkipped = 0;  // solves (and applies) skipped as unchanged (fast engine)
+    } stats;
+
+    // (not in TS) convergence diagnostic, for benchmarks: when set, runCircuit() counts how
+    // many sub-iterations each element reported as not converged.  Off (null) by default.
+    std::unordered_map<CircuitElm *, int64_t> *convergenceBlame = nullptr;
+    // (not in TS) per-element doStep() profile, for benchmarks: time-stamp-counter ticks and
+    // call counts.  Off (null) by default; the timing itself adds ~20 cycles per call.
+    struct ElmTicks {
+        uint64_t ticks = 0;
+        int64_t calls = 0;
+    };
+    std::unordered_map<CircuitElm *, ElmTicks> *doStepTicks = nullptr;
+
+    // (not in TS) phase profiler, for benchmarks: when profiling is on, runCircuit() adds the
+    // time-stamp-counter ticks (see CycleCounter.h) spent in each phase.  Off, it costs one
+    // well-predicted branch per phase.  Reset with profile = {}.
+    bool profiling = false;
+    struct Profile {
+        uint64_t startIteration = 0;  // elements' startIteration()
+        uint64_t restore = 0;         // copying origRightSide/origMatrix back each sub-iteration
+        uint64_t doStep = 0;          // elements' doStep()
+        uint64_t factor = 0;          // lu_factor()
+        uint64_t solve = 0;           // lu_solve()
+        uint64_t apply = 0;           // applySolvedRightSide(): node voltages + calculateCurrent()
+        uint64_t stepFinished = 0;    // elements' stepFinished()
+        uint64_t wireCurrents = 0;    // calcWireCurrents()
+        uint64_t other = 0;           // loop bookkeeping, saving node voltages, restamps
+        uint64_t total = 0;           // all of runCircuit()
+    } profile;
 
     std::vector<int> unconnectedNodes;
     std::vector<CircuitElm *> nodesWithGroundConnection;
@@ -146,6 +192,12 @@ public:
     std::shared_ptr<class SubcircuitModel> getCircuitAsComposite();
     void preStampAndStampCircuit();
     void stampCircuit();
+    // (not in TS) fast engine: flag only the matrices that nonlinear elements stamp
+    void markNonLinearMatrices();
+    // (not in TS) fast engine: recover if something stamped a frozen (linear) matrix
+    bool checkFrozenStamps();
+    // (not in TS) fast engine: would solving m now give exactly the solution its nodes hold?
+    bool solveIsUnchanged(CircuitMatrix &m);
     void makePostDrawList();
     void stop(const std::string &s, CircuitElm *ce);
 

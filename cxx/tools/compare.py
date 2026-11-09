@@ -14,8 +14,10 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-TSX = os.path.join(ROOT, "..", "ts", "node_modules", ".bin", "tsx")
-BUILD = os.path.join(ROOT, "build-win" if os.name == "nt" else "build-mac")
+# on Windows, .bin/tsx is a shell script; tsx.cmd is the wrapper that CreateProcess can run
+TSX = os.path.join(ROOT, "..", "ts", "node_modules", ".bin", "tsx.cmd" if os.name == "nt" else "tsx")
+# SIMTRACE_BUILD=dir picks another build directory (relative to cxx/), e.g. build-clang
+BUILD = os.path.join(ROOT, os.environ.get("SIMTRACE_BUILD", "build-win" if os.name == "nt" else "build-mac"))
 CXX = os.path.join(BUILD, "simtrace")
 
 # The C++ core uses V8's own math functions, so traces should be bit-identical.

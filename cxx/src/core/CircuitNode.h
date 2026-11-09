@@ -44,6 +44,9 @@ public:
     static NodeRef ground;
 
     std::vector<CircuitNodeLink> links;
+    // (not in TS) fast engine: the elements of links, in order, whose calculateCurrent() isn't
+    // CircuitElm's empty one; built by SimulationManager::stampCircuit()
+    std::vector<CircuitElm *> calculateCurrentElms;
     bool internal = false;
     int index = 0;
     CircuitMatrix *matrix = nullptr;

@@ -236,6 +236,9 @@ const fmt = (x: number) => x.toPrecision(17);
 const dumpStep = parseInt(process.env.DUMPMATRIX ?? "-1");
 // TOGGLE=elm:step,... toggles switches, as clicking them in the app does
 const toggles = (process.env.TOGGLE ?? "").split(",").filter(t => t.includes(":")).map(t => t.split(":").map(Number));
+// BENCH=1 prints nothing per step, only the time the steps took (as the C++ simtrace does)
+const bench = process.env.BENCH !== undefined;
+const benchStart = performance.now();
 for (let s = 0; s < steps; s++) {
     if (s === dumpStep) app.dumpMatrix = true;
     let toggled = false;
@@ -261,10 +264,14 @@ for (let s = 0; s < steps; s++) {
         out("stop " + app.stopMessage);
         break;
     }
+    if (bench)
+        continue;
     const vs = sim.nodeList.map(n => fmt(n.v));
     const cs = sim.elmList.map((e: any) => fmt(e.getCurrent()));
     out(fmt(sim.t) + " " + vs.join(" ") + " | " + cs.join(" "));
 }
+if (bench)
+    out(`${steps} steps, ${((performance.now() - benchStart) / 1000).toFixed(3)} s`);
 
 // AUDIOOUT=file: press Play on the first audio output and save the WAV it would play
 if (process.env.AUDIOOUT) {

@@ -29,6 +29,7 @@
 //            inputs and outputs instead (clock pins still get a square wave), for trying
 //            it by hand.
 //
+// ENGINE=ref uses the reference engine instead of the fast one.
 // DUMPMATRIX=n prints the matrices at step n; TOGGLE=elm:step,... toggles the switches
 // with those element indexes at those steps (as clicking them in the app does).  BENCH=1
 // prints nothing per step, only the time the steps took.
@@ -260,6 +261,9 @@ int main(int argc, char **argv) {
     // SOLVER=n overrides the circuit's matrix solver (0=auto, 1=dense, 2=sparse)
     if (const char *so = std::getenv("SOLVER"))
         sim.solverType = std::atoi(so);
+    // ENGINE=ref runs the reference engine (the original algorithm); the default is the fast one
+    if (const char *en = std::getenv("ENGINE"))
+        sim.fastEngine = std::string(en) != "ref";
 
     sim.analyzeCircuit();
     sim.preStampAndStampCircuit();

@@ -18,10 +18,13 @@
 */
 
 #include "SimulationManager.h"
+
+#include "CycleCounter.h"
 #include "Locale.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 
 #include "CircuitElm.h"
@@ -914,7 +917,9 @@ void SimulationManager::stampCircuit() {
     }
 
     // set nonLinear flag per matrix
-    if (circuitNonLinear) {
+    if (fastEngine)
+        markNonLinearMatrices();
+    else if (circuitNonLinear) {
         for (auto &m : matrices)
             m->nonLinear = true;
     }
@@ -953,15 +958,43 @@ void SimulationManager::stampCircuit() {
     for (auto &mp : matrices) {
         CircuitMatrix &m = *mp;
         if (!m.nonLinear) {
+            stats.factors++;
             if (!lu_factor(m.matrix, m.size, m.permute, m)) {
                 stop("Singular matrix!", nullptr);
                 return;
             }
+            // the dense factors now live in m.matrix: no more stamping until the next clear()
+            if (fastEngine)
+                m.frozen = true;
         }
     }
 
     // copy elmList to an array to avoid a bunch of calls to canCast() when doing simulation
     elmArr = elmList;
+
+    // (not in TS) most elements (wires, resistors, labels...) leave these hooks empty; calling
+    // an empty function does nothing, so the fast engine calls only the ones that do something
+    doStepList.clear();
+    startIterationList.clear();
+    stepFinishedList.clear();
+    for (CircuitElm *ce : elmArr) {
+        unsigned hooks = ce->overriddenHooks();
+        if (hooks & HOOK_DO_STEP)
+            doStepList.push_back(ce);
+        if (hooks & HOOK_START_ITERATION)
+            startIterationList.push_back(ce);
+        if (hooks & HOOK_STEP_FINISHED)
+            stepFinishedList.push_back(ce);
+    }
+    // and per node, the linked elements whose calculateCurrent() does something (an element
+    // linked twice, by two posts on the node, stays in twice, as it is called twice)
+    for (auto &mp : matrices)
+        for (CircuitNode *cn : mp->nodeList) {
+            cn->calculateCurrentElms.clear();
+            for (const CircuitNodeLink &cnl : cn->links)
+                if (cnl.elm->overriddenHooks() & HOOK_CALCULATE_CURRENT)
+                    cn->calculateCurrentElms.push_back(cnl.elm);
+        }
 
     // copy ScopeElms to an array to avoid a second pass over entire list of elms during simulation
     app->scopeElmArr.clear();
@@ -970,6 +1003,77 @@ void SimulationManager::stampCircuit() {
             app->scopeElmArr.push_back(ce);
 
     needsStamp = false;
+}
+
+// (not in TS) The reference engine marks every matrix nonlinear if any element in the circuit is
+// nonlinear, so one diode makes every independent sub-circuit re-factor its matrix on every
+// Newton sub-iteration.  Here only the matrices a nonlinear element can restamp in doStep() are
+// marked: those holding its nodes (posts and internal nodes) and its voltage source rows.
+// Factoring a matrix that didn't change gives the same factors bit for bit, so this changes
+// how much work is done, not the results.
+void SimulationManager::markNonLinearMatrices() {
+    for (auto &m : matrices) {
+        m->nonLinear = m->forceNonLinear;
+        // a forced matrix needs Newton iterations even if no element says it's nonlinear
+        if (m->forceNonLinear)
+            circuitNonLinear = true;
+    }
+    if (!circuitNonLinear)
+        return;
+    for (CircuitElm *ce : elmList) {
+        if (!ce->nonLinear())
+            continue;
+        for (int k = 0; k != ce->getNodeCount(); k++) {
+            const NodeRef &n = ce->getNode(k);
+            if (n && n->matrix)
+                n->matrix->nonLinear = true;
+        }
+    }
+    for (int i = 0; i != voltageSourceCount; i++) {
+        VoltageSource *vs = voltageSources[i].get();
+        if (vs->matrix && vs->elm && vs->elm->nonLinear())
+            vs->matrix->nonLinear = true;
+    }
+}
+
+// (not in TS) If an element stamped a frozen matrix in doStep() (it claims nonLinear() == false
+// but changes the matrix anyway), mark that matrix nonlinear for good and restamp everything.
+// Returns true if the caller must redo the timestep.
+bool SimulationManager::checkFrozenStamps() {
+    bool found = false;
+    for (auto &m : matrices)
+        if (m->frozenStamped) {
+            m->forceNonLinear = true;
+            found = true;
+        }
+    if (!found)
+        return false;
+    console("an element changed a linear matrix in doStep(); treating that matrix as nonlinear");
+    stampCircuit();
+    return true;
+}
+
+// (not in TS) Solving m again would reproduce exactly what its nodes hold if:
+// - its factors are the ones the last solve used (a frozen linear matrix, or DenseLU reused
+//   them this sub-iteration),
+// - the right side is bit-for-bit the right side of the last solve,
+// - that solve had no NaN (a NaN solution must clear `converged` again), and
+// - the nodes still hold that solution bit for bit (resets and redone timesteps overwrite them).
+// Then lu_solve() and applySolvedRightSide() can be skipped.  The one thing skipping leaves
+// out is calculateCurrent() on the elements attached to these nodes; with unchanged voltages
+// it would recompute the same currents, and the trace comparison (which records every
+// element's current at every step) checks that.
+bool SimulationManager::solveIsUnchanged(CircuitMatrix &m) {
+    if (usingSparse || !m.lastRightSideValid || m.lastSolveHadNaN)
+        return false;
+    if (m.nonLinear && !m.denseLU.reused())
+        return false;
+    if (std::memcmp(m.rightSide.data(), m.lastRightSide.data(), sizeof(double) * m.size) != 0)
+        return false;
+    for (CircuitNode *cn : m.nodeList)
+        if (std::memcmp(&cn->v, &m.nodeVoltages[cn->row - 1], sizeof(double)) != 0)
+            return false;
+    return true;
 }
 
 // make list of posts we need to draw.  posts shared by 2 elements should be hidden, all
@@ -1220,6 +1324,26 @@ void SimulationManager::runCircuit(bool didAnalyze) {
     if (CircuitNode::ground->v != 0)
         stop("ground node at nonzero voltage", nullptr);
 
+    // (not in TS) phase profiler: `mark` is the time-stamp counter at the last phase boundary;
+    // lap(x) charges the ticks since then to phase x.  One RDTSC per boundary, and none at all
+    // unless profiling is on.
+    uint64_t mark = profiling ? cycleCount() : 0;
+    auto lap = [&](uint64_t &phase) {
+        if (profiling) {
+            uint64_t now = cycleCount();
+            phase += now - mark;
+            mark = now;
+        }
+    };
+    struct TotalTimer {
+        SimulationManager *sim;
+        uint64_t start;
+        ~TotalTimer() {
+            if (sim->profiling)
+                sim->profile.total += cycleCount() - start;
+        }
+    } totalTimer{this, mark};
+
     for (;;) {
         if (goodIterations >= 3 && timeStep < maxTimeStep) {
             // things are going well, double the time step
@@ -1229,21 +1353,28 @@ void SimulationManager::runCircuit(bool didAnalyze) {
             goodIterations = 0;
         }
 
-        for (CircuitElm *ce : elmArr)
+        lap(profile.other);  // timestep bookkeeping and the rare restamp
+        // (not in TS) the fast engine skips elements whose hooks are empty (see stampCircuit())
+        const std::vector<CircuitElm *> &doSteps = fastEngine ? doStepList : elmArr;
+        for (CircuitElm *ce : fastEngine ? startIterationList : elmArr)
             ce->startIteration();
+        lap(profile.startIteration);
         app->steps++;
         int subiterCount = (adjustTimeStep && timeStep / 2 > minTimeStep) ? 100 : 5000;
         int subiter;
+        bool redoStep = false;  // (not in TS) see checkFrozenStamps()
         for (subiter = 0; subiter != subiterCount; subiter++) {
             converged = true;
             subIterations = subiter;
+            stats.subIterations++;
             for (auto &mp : matrices) {
                 CircuitMatrix &m = *mp;
                 for (int i = 0; i != m.size; i++)
                     m.rightSide[i] = m.origRightSide[i];
                 if (m.nonLinear) {
-                    if (usingSparse) {
-                        // the sparse lu_factor leaves m.matrix alone, so only stamped entries can differ
+                    if (usingSparse || fastEngine) {
+                        // the sparse lu_factor and the fast engine's DenseLU leave m.matrix
+                        // alone, so only stamped entries can differ
                         for (int k : m.stamped)
                             m.matrix[k % m.size][k / m.size] = m.origMatrix[k % m.size][k / m.size];
                     } else {
@@ -1253,15 +1384,48 @@ void SimulationManager::runCircuit(bool didAnalyze) {
                     }
                 }
             }
-            for (CircuitElm *ce : elmArr)
-                ce->doStep();
+            lap(profile.restore);
+            if (convergenceBlame) {
+                // (not in TS) same as below, but find every element that clears `converged`
+                // (elements only ever set it to false, so resetting it in between is harmless)
+                bool all = true;
+                for (CircuitElm *ce : doSteps) {
+                    converged = true;
+                    ce->doStep();
+                    if (!converged) {
+                        (*convergenceBlame)[ce]++;
+                        all = false;
+                    }
+                }
+                converged = all;
+            } else if (doStepTicks) {
+                // (not in TS) time each element's doStep()
+                for (CircuitElm *ce : doSteps) {
+                    uint64_t t0 = cycleCount();
+                    ce->doStep();
+                    ElmTicks &e = (*doStepTicks)[ce];
+                    e.ticks += cycleCount() - t0;
+                    e.calls++;
+                }
+            } else
+                for (CircuitElm *ce : doSteps)
+                    ce->doStep();
+            lap(profile.doStep);
             if (app->stopMessage)
                 return;
+            if (fastEngine && checkFrozenStamps()) {
+                redoStep = true;
+                break;
+            }
             bool printit = debugprint;
             debugprint = false;
             for (size_t mi = 0; mi != matrices.size(); mi++) {
                 CircuitMatrix &m = *matrices[mi];
-                if (m.size < 8) {
+                // (not in TS) a frozen matrix can't change, so once it has passed this check it
+                // always will; the fast engine remembers that instead of rescanning
+                if (m.size < 8 && !(fastEngine && m.frozen && m.passedFiniteCheck)) {
+                    if (fastEngine && m.frozen)
+                        m.passedFiniteCheck = true;  // set now; stop() below ends the run anyway
                     for (int j = 0; j != m.size; j++) {
                         for (int i = 0; i != m.size; i++) {
                             double x = m.matrix[i][j];
@@ -1283,23 +1447,59 @@ void SimulationManager::runCircuit(bool didAnalyze) {
                         console(x);
                     }
                 }
+                // On the pass that confirms convergence, the reference engine skips solving the
+                // nonlinear matrices and keeps the previous solution.  It marks every matrix
+                // nonlinear when the circuit is nonlinear, so (for example) a logic gate output
+                // that changes in that last doStep() takes effect one timestep later.  The fast
+                // engine keeps that timing: it skips the same solves, and saves only the
+                // factorizations of matrices that didn't change.
+                bool skipConvergedPass = fastEngine ? circuitNonLinear : m.nonLinear;
+                if (skipConvergedPass && converged && subiter > 0)
+                    continue;
                 if (m.nonLinear) {
-                    if (converged && subiter > 0)
-                        continue;
+                    stats.factors++;
                     if (!lu_factor(m.matrix, m.size, m.permute, m)) {
                         stop("Singular matrix!", nullptr);
                         return;
                     }
                 }
+                lap(profile.factor);  // includes the NaN check above
+                stats.solves++;
+                if (fastEngine) {
+                    if (solveIsUnchanged(m)) {
+                        stats.solvesSkipped++;
+                        lap(profile.solve);
+                        continue;
+                    }
+                    if (!usingSparse)
+                        m.lastRightSide = m.rightSide;  // lu_solve() overwrites it with the solution
+                }
                 lu_solve(m.matrix, m.size, m.permute, m.rightSide, m);
+                if (fastEngine && !usingSparse) {
+                    m.lastSolveHadNaN = false;
+                    for (int i = 0; i != m.size; i++)
+                        if (std::isnan(m.rightSide[i]))
+                            m.lastSolveHadNaN = true;
+                    m.lastRightSideValid = true;
+                }
+                lap(profile.solve);
                 applySolvedRightSide(m);
+                lap(profile.apply);
             }
+            lap(profile.factor);  // skipped matrices' NaN checks
             if (printit)
                 console("done");
             if (!circuitNonLinear)
                 break;
             if (converged && subiter > 0)
                 break;
+        }
+        if (redoStep) {
+            // (not in TS) a matrix was just made nonlinear and restamped: start this timestep
+            // over from the node voltages it started with, as after a convergence failure
+            for (auto &mp : matrices)
+                setNodeVoltages(*mp, mp->lastNodeVoltages);
+            continue;
         }
         if (subiter == subiterCount) {
             // convergence failed
@@ -1331,10 +1531,13 @@ void SimulationManager::runCircuit(bool didAnalyze) {
             timeStepAccum -= maxTimeStep;
             timeStepCount++;
         }
-        for (CircuitElm *ce : elmArr)
+        lap(profile.other);
+        for (CircuitElm *ce : fastEngine ? stepFinishedList : elmArr)
             ce->stepFinished();
+        lap(profile.stepFinished);
         if (!delayWireProcessing)
             calcWireCurrents();
+        lap(profile.wireCurrents);
         app->onTimeStep();
         // save last node voltages so we can restart the next iteration if necessary
         for (auto &mp : matrices) {
@@ -1355,8 +1558,10 @@ void SimulationManager::runCircuit(bool didAnalyze) {
             break;
     }
     lastIterTime = lit;
+    lap(profile.other);
     if (delayWireProcessing)
         calcWireCurrents();
+    lap(profile.wireCurrents);
 }
 
 // set node voltages given right side found by solving one matrix
@@ -1383,8 +1588,12 @@ void SimulationManager::applySolvedRightSide(CircuitMatrix &m) {
 void SimulationManager::setNodeVoltages(CircuitMatrix &m, const std::vector<double> &nv) {
     for (CircuitNode *cn : m.nodeList) {
         cn->v = nv[cn->row - 1];
-        for (const CircuitNodeLink &cnl : cn->links)
-            cnl.elm->calculateCurrent();
+        if (fastEngine) {
+            for (CircuitElm *ce : cn->calculateCurrentElms)
+                ce->calculateCurrent();
+        } else
+            for (const CircuitNodeLink &cnl : cn->links)
+                cnl.elm->calculateCurrent();
     }
 }
 
@@ -1453,6 +1662,13 @@ bool SimulationManager::lu_factor(std::vector<std::vector<double>> &a, int n, st
         DMatrixSparseCSC sparse = DMatrixSparseCSC::convert(a, cm.stamped, DMatrixSparseCSC::EPS);
         if (!cm.sparseLU) cm.sparseLU = std::make_unique<SparseLU>();
         return cm.sparseLU->setA(sparse);
+    }
+    // (not in TS) same factors, faster, and a stays as stamped (see DenseLU.h)
+    if (sm != nullptr && sm->fastEngine) {
+        bool ok = cm.denseLU.factor(a, n, cm.stamped);
+        if (cm.denseLU.reused())
+            sm->stats.factorsReused++;
+        return ok;
     }
     return lu_factor_dense(a, n, ipvt);
 }
@@ -1539,6 +1755,10 @@ void SimulationManager::lu_solve(std::vector<std::vector<double>> &a, int n, std
     SimulationManager *sm = theSim;
     if (sm != nullptr && sm->usingSparse && cm.sparseLU) {
         cm.sparseLU->solve(b, b);
+        return;
+    }
+    if (sm != nullptr && sm->fastEngine) {
+        cm.denseLU.solve(b);
         return;
     }
     lu_solve_dense(a, n, ipvt, b);
