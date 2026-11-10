@@ -157,6 +157,7 @@ public:
 
     // one frame: analyze if needed, run the simulation, draw everything
     void updateCircuit(QPainter &painter);
+    void paintCanvas(QWidget *w);
 
     QWidget *canvasWidget() const { return (QWidget *) canvas; }
 
@@ -189,8 +190,24 @@ public:
     // lowers the target frame rate; turning it off restores both.
     QAction *fastForwardAction = nullptr;
     bool fastForward = false;
-    double normalMinFrameRate = 20;
-    static constexpr double FAST_FORWARD_FRAME_RATE = 4;  // frames per second while on
+    static constexpr double FAST_FORWARD_FRAME_RATE = 4;  // paints per second while on
+    // While on, the simulation doesn't run inside the paint (which would leave it idle between
+    // paints); simTimer, with interval 0, runs a short slice whenever the event loop has nothing
+    // else to do, so the screen stays responsive and the CPU is almost all simulation.
+    QTimer simTimer;
+    // Each slice costs about 1.4 ms of event-loop turnaround, so longer is cheaper (30 ms: 4%);
+    // it is also the longest the window can go without handling a click or a key.
+    static constexpr double FAST_FORWARD_SLICE_MS = 30;
+    // Painting is expensive in the app (Qt flushes the whole canvas to the window, ~35 ms), so
+    // Fast Forward paints often enough to look alive, 1 to 4 times a second, and no more often
+    // than costs this share of the time.
+    static constexpr double FAST_FORWARD_PAINT_SHARE = 0.05;
+    double ffPaintStart = 0;   // when the last paint began, until runSimSlice() has timed it
+    double ffPaintCostMs = 0;  // smoothed cost of a paint cycle
+    void runSimSlice();
+    // runCircuit(), with the timing that --screenshot runs report
+    void timedRunCircuit(bool didAnalyze);
+    int paintIntervalMs() const { return fastForward ? (int) (1000 / FAST_FORWARD_FRAME_RATE) : 16; }
     void setFastForward(bool on);
     double getIterCount() override { return fastForward ? 1e9 : SimApp::getIterCount(); }
     // the tool (or command) assigned to key k, or null if there is none
@@ -372,4 +389,12 @@ private:
     QString startCircuit, startLabel;
     QString screenshotPath;
     int screenshotFrames = -1;
+    // (not in TS) timing for --screenshot runs: time spent in runCircuit() and in the rest of
+    // each frame (mostly drawing), against the wall time since the first frame
+    double statSimMs = 0, statDrawElmsMs = 0, statDrawOtherMs = 0, statWallStart = 0;
+    double statPaintMs = 0, statUpdateMs = 0, statGapMs = 0, statLastPaintEnd = 0;
+    long statStepsAtStart = 0;
+    int statFrames = 0;  // runCircuit() calls
+    int statPaints = 0;
+    double statSliceGapMs = 0, statLastRunEnd = 0;  // time between one runCircuit() call and the next
 };

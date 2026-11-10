@@ -1353,7 +1353,11 @@ void SimulationManager::runCircuit(bool didAnalyze) {
         if (goodIterations >= 3 && timeStep < maxTimeStep) {
             // things are going well, double the time step
             timeStep = std::min(timeStep * 2, maxTimeStep);
-            console("timestep up = " + jsNumberToString(timeStep) + " at " + jsNumberToString(t));
+            // (not in TS) progress messages only in Developer Mode: in the app every console line
+            // is appended to the Console dialog on the GUI thread, and a circuit that needs a few
+            // extra iterations logs hundreds a second, which used to cost ~15% of the time
+            if (app->developerMode)
+                console("timestep up = " + jsNumberToString(timeStep) + " at " + jsNumberToString(t));
             stampCircuit();
             goodIterations = 0;
         }
@@ -1511,7 +1515,8 @@ void SimulationManager::runCircuit(bool didAnalyze) {
             goodIterations = 0;
             if (adjustTimeStep) {
                 timeStep /= 2;
-                console("timestep down to " + jsNumberToString(timeStep) + " at " + jsNumberToString(t));
+                if (app->developerMode)
+                    console("timestep down to " + jsNumberToString(timeStep) + " at " + jsNumberToString(t));
             }
             if (timeStep < minTimeStep || !adjustTimeStep) {
                 console("convergence failed after " + std::to_string(subiter) + " iterations");
@@ -1525,7 +1530,8 @@ void SimulationManager::runCircuit(bool didAnalyze) {
             continue;
         }
         if (subiter > 5 || timeStep < maxTimeStep)
-            console("converged after " + std::to_string(subiter) + " iterations, timeStep = " + jsNumberToString(timeStep));
+            if (app->developerMode)  // (see "timestep up" above)
+                console("converged after " + std::to_string(subiter) + " iterations, timeStep = " + jsNumberToString(timeStep));
         if (subiter < 3)
             goodIterations++;
         else

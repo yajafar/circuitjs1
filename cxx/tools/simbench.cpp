@@ -124,8 +124,8 @@ char decodeSegments(int bits) {
     }
 }
 
-// The logic-level (no diode) 7-segment displays, in reading order for a clock laid out as
-// columns: right-most column first (most significant), top to bottom within a column.
+// The logic-level (no diode) 7-segment displays, in reading order: top row first, left to
+// right within a row (HH MM SS for a clock with its digits in a line).
 std::vector<SevenSegElm *> findDisplays(std::vector<CircuitElm *> &elms) {
     std::vector<SevenSegElm *> displays;
     for (CircuitElm *ce : elms)
@@ -133,7 +133,7 @@ std::vector<SevenSegElm *> findDisplays(std::vector<CircuitElm *> &elms) {
             if (d->diodeDirection == 0 && d->segmentCount == 7)
                 displays.push_back(d);
     std::sort(displays.begin(), displays.end(), [](SevenSegElm *a, SevenSegElm *b) {
-        return a->x != b->x ? a->x > b->x : a->y < b->y;
+        return a->y != b->y ? a->y < b->y : a->x < b->x;
     });
     return displays;
 }
@@ -228,6 +228,7 @@ int main(int argc, char **argv) {
     sim.fastEngine = !refEngine;
     app.frameSteps = frameSteps;
     app.wiresEveryStep = wiresEveryStep;
+    app.developerMode = verbose;  // --verbose: also log the engine's per-step progress messages
 
     CircuitLoader loader(&app, &sim);
     loader.readCircuit(text.str());

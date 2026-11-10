@@ -42,6 +42,7 @@
 #include <QPainter>
 #include <QTextStream>
 #include <QUrl>
+#include <algorithm>
 #include <chrono>
 #include <regex>
 #include <functional>
@@ -111,9 +112,24 @@ void CircuitCanvas::contextMenuEvent(QContextMenuEvent *e) {
     app->doPopupMenu(e->globalPos());
 }
 
-void CircuitCanvas::paintEvent(QPaintEvent *) {
-    QPainter painter(this);
-    app->updateCircuit(painter);
+void CircuitCanvas::paintEvent(QPaintEvent *) { app->paintCanvas(this); }
+
+// paint the canvas, timing the paint (see the stat* members, written out by --screenshot)
+void CirSim::paintCanvas(QWidget *w) {
+    const double t0 = currentTimeMillis();
+    if (statLastPaintEnd != 0)
+        statGapMs += t0 - statLastPaintEnd;
+    {
+        QPainter painter(w);
+        const double u0 = currentTimeMillis();
+        updateCircuit(painter);
+        statUpdateMs += currentTimeMillis() - u0;
+    }  // the painter's destructor flushes to the window
+    statLastPaintEnd = currentTimeMillis();
+    statPaintMs += statLastPaintEnd - t0;
+    statPaints++;
+    if (fastForward)
+        ffPaintStart = t0;  // runSimSlice() measures how long until it gets going again
 }
 
 void CircuitCanvas::mousePressEvent(QMouseEvent *e) {
@@ -196,10 +212,12 @@ CirSim::CirSim() {
     // the TS version redraws on a 16ms timer while the simulation runs
     connect(&timer, &QTimer::timeout, canvas, [this] { canvas->update(); });
     timer.start(16);
+    connect(&simTimer, &QTimer::timeout, this, [this] { runSimSlice(); });
 }
 
 CirSim::~CirSim() {
     timer.stop();
+    simTimer.stop();
     cutItem = nullptr;  // stop enableDisableMenuItems() looking at deleted elements
     resetSubcircuitView();
     deleteAllElms();
@@ -730,17 +748,76 @@ void CirSim::setFastForward(bool on) {
     if (on == fastForward)
         return;
     fastForward = on;
+    ffPaintStart = ffPaintCostMs = 0;
     if (on) {
-        // runCircuit() computes until the frame's time is up (1000 / minFrameRate ms), so a low
-        // frame rate gives the simulation most of each second
-        normalMinFrameRate = minFrameRate;
-        minFrameRate = FAST_FORWARD_FRAME_RATE;
         if (!simRunning)
             setSimRunning(true);
-    } else
-        minFrameRate = normalMinFrameRate;
+        else {
+            timer.start(paintIntervalMs());
+            simTimer.start(0);
+        }
+    } else {
+        simTimer.stop();
+        if (simRunning)
+            timer.start(paintIntervalMs());
+    }
     if (fastForwardAction && fastForwardAction->isChecked() != on)
         fastForwardAction->setChecked(on);
+}
+
+// One slice of Fast Forward simulation: run the engine for about FAST_FORWARD_SLICE_MS, then
+// return to the event loop, which handles input and paints (4 times a second) before the timer
+// fires again.  runCircuit() stops after 1000 / minFrameRate ms from lastFrameTime, so both are
+// set for the slice.  Analysis and stamping stay in the paint (updateCircuit()), which a change
+// to the circuit asks for with update().
+void CirSim::runSimSlice() {
+    if (!fastForward || !simRunning || stopMessage || !sim->matricesValid) {
+        simTimer.stop();  // updateCircuit() starts it again when there is something to run
+        return;
+    }
+    if (analyzeFlag || dcAnalysisFlag || sim->needsStamp) {
+        canvas->update();  // the paint analyzes the circuit
+        return;
+    }
+    const double now = currentTimeMillis();
+    if (ffPaintStart != 0) {
+        // what the last paint really cost: the paint itself, Qt flushing it to the window, and
+        // the event loop getting back to us.  Paint just often enough to keep that near
+        // FAST_FORWARD_PAINT_SHARE of the time.
+        const double cost = now - ffPaintStart;
+        ffPaintStart = 0;
+        ffPaintCostMs = ffPaintCostMs == 0 ? cost : 0.5 * ffPaintCostMs + 0.5 * cost;
+        const double interval = std::clamp(ffPaintCostMs / FAST_FORWARD_PAINT_SHARE, 250.0, 1000.0);
+        timer.setInterval((int) interval);
+    }
+    lastFrameTime = now;
+    // runCircuit() also stops once it has done as many steps as the speed slider allows for the
+    // time since lastIterTime, counted in whole milliseconds: a slice that starts in the same
+    // millisecond as the last one ended would stop after one step.  Fast Forward has no such limit.
+    sim->lastIterTime = now - 1000;
+    const double savedFrameRate = minFrameRate;
+    minFrameRate = 1000.0 / FAST_FORWARD_SLICE_MS;
+    // true: don't return early because "no time has passed" since the last step (the check that
+    // paces slow speeds, which a full-speed slice must skip)
+    timedRunCircuit(true);
+    minFrameRate = savedFrameRate;
+}
+
+void CirSim::timedRunCircuit(bool didAnalyze) {
+    const double start = currentTimeMillis();
+    if (statFrames == 0) {
+        statWallStart = start;
+        statStepsAtStart = steps;
+    } else
+        statSliceGapMs += start - statLastRunEnd;
+    try {
+        sim->runCircuit(didAnalyze);
+    } catch (std::exception &e) {
+        SimulationManager::console(std::string("exception in runCircuit ") + e.what());
+    }
+    statLastRunEnd = currentTimeMillis();
+    statSimMs += statLastRunEnd - start;
+    statFrames++;
 }
 
 void CirSim::setSimRunning(bool s) {
@@ -748,10 +825,13 @@ void CirSim::setSimRunning(bool s) {
         if (stopMessage)
             return;
         simRunning = true;
-        timer.start(16);
+        timer.start(paintIntervalMs());
+        if (fastForward)
+            simTimer.start(0);
     } else {
         simRunning = false;
         timer.stop();
+        simTimer.stop();
         canvas->update();
     }
     if (runStopAction && runStopAction->isChecked() != simRunning)
@@ -958,13 +1038,13 @@ void CirSim::updateCircuit(QPainter &painter) {
         g.restore();
     }
 
-    if (simRunning) {
+    // Fast Forward simulates in runSimSlice() instead; here, just make sure it is running
+    // (it stops itself when the circuit needs analysis or is stopped)
+    if (fastForward && simRunning && !stopMessage && !analyzeFlag && sim->matricesValid && !simTimer.isActive())
+        simTimer.start(0);
+    if (simRunning && !fastForward) {
         perfmon.startContext("runCircuit()");
-        try {
-            sim->runCircuit(didAnalyze);
-        } catch (std::exception &e) {
-            SimulationManager::console(std::string("exception in runCircuit ") + e.what());
-        }
+        timedRunCircuit(didAnalyze);
         perfmon.stopContext();
     }
 
@@ -1002,6 +1082,7 @@ void CirSim::updateCircuit(QPainter &painter) {
     g.setTransform(transform[0], 0, 0, transform[3], transform[4], transform[5]);
 
     perfmon.startContext("elm.draw()");
+    const double drawStart = currentTimeMillis();
     for (CircuitElm *ce : *uiElmList) {
         if (options.power)
             g.setColor(Color::gray);
@@ -1015,6 +1096,7 @@ void CirSim::updateCircuit(QPainter &painter) {
     // draw stopHighlightElm on top of everything else so it's always visible
     if (stopHighlightElm != nullptr)
         stopHighlightElm->draw(g);
+    statDrawElmsMs += currentTimeMillis() - drawStart;
     perfmon.stopContext();
 
     if (mouseMode != MODE_DRAG_ROW && mouseMode != MODE_DRAG_COLUMN) {
@@ -1078,6 +1160,7 @@ void CirSim::updateCircuit(QPainter &painter) {
     drawBottomArea(g);
     perfmon.stopContext();
 
+    statDrawOtherMs += currentTimeMillis() - drawStart;  // elements plus the rest of the picture (so far)
     perfmon.stopContext(); // graphics
 
     if (stopHighlightElm != nullptr && stopHighlightElm != CircuitElm::mouseElmRef)
@@ -1134,6 +1217,34 @@ void CirSim::updateCircuit(QPainter &painter) {
     if (screenshotFrames > 0 && --screenshotFrames == 0) {
         QTimer::singleShot(0, this, [this] {
             grab().save(screenshotPath);
+            // timing of the run, next to the picture: how much of the time went to simulating
+            QFile stats(screenshotPath + ".txt");
+            if (stats.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                const double wallMs = currentTimeMillis() - statWallStart;
+                const double stepsDone = (double) (steps - statStepsAtStart);
+                QString s = QString("run_calls %1\nwall_ms %2\nsim_ms %3\nsim_share %4\nsteps %5\n"
+                                    "steps_per_s %6\nsimulated_s %7\nspeed_x %8\n"
+                                    "draw_elements_ms %9\ndraw_all_ms %10\n"
+                                    "paint_event_ms %11\nupdate_circuit_ms %12\ngap_between_paints_ms %13\n"
+                                    "paints %14\nbetween_run_calls_ms %15\npaint_cycle_ms %16\n")
+                                .arg(statFrames)
+                                .arg(wallMs, 0, 'f', 0)
+                                .arg(statSimMs, 0, 'f', 0)
+                                .arg(statSimMs / wallMs, 0, 'f', 3)
+                                .arg(stepsDone, 0, 'f', 0)
+                                .arg(stepsDone / wallMs * 1000, 0, 'f', 0)
+                                .arg(stepsDone * sim->timeStep, 0, 'f', 3)
+                                .arg(stepsDone * sim->timeStep / (wallMs / 1000), 0, 'f', 3)
+                                .arg(statDrawElmsMs, 0, 'f', 0)
+                                .arg(statDrawOtherMs, 0, 'f', 0)
+                                .arg(statPaintMs, 0, 'f', 0)
+                                .arg(statUpdateMs, 0, 'f', 0)
+                                .arg(statGapMs, 0, 'f', 0)
+                                .arg(statPaints)
+                                .arg(statSliceGapMs, 0, 'f', 0)
+                                .arg(ffPaintCostMs, 0, 'f', 1);
+                stats.write(s.toUtf8());
+            }
             QApplication::quit();
         });
     }
