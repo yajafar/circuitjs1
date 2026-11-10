@@ -4,3 +4,4 @@ build-win/
 build-clang/
 build-ltcg/
 build-pgo/
+build-prof/

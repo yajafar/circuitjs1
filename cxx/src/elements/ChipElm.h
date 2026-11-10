@@ -86,6 +86,8 @@ public:
     int flippedSizeY = 0;
     bool lastClock = false;
     bool justLoaded = false;
+    // (not in TS) fast engine: outputs are set once per step in startIteration(); see stamp()
+    bool outputsPerStep = false;
     int labelX = 0;
     int labelY = 0;
 
@@ -142,6 +144,7 @@ public:
     virtual void execute() {}
     void startIteration() override;
     void doStep() override;
+    bool skipsDoStep() const override { return outputsPerStep; }
     void reset() override;
     void dumpXml(XmlElement *doc, XmlElement *elem) override;
     void dumpXmlState(XmlElement *doc, XmlElement *elem) override;

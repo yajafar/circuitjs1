@@ -231,6 +231,12 @@ public:
     // independent current source flowing into node i
     void stampRightSide(const NodeRef &n, double x);
     void stampRightSideVS(VoltageSource *vs, double x);
+    // (not in TS) fast engine: give voltage source vs the value v for the whole timestep, by writing
+    // origRightSide (which runCircuit() restores before every sub-iteration) once, instead of
+    // stamping it again in every doStep().  Only for a source whose row nothing else stamps and
+    // whose stamp() left the row at +0.0 (stampVoltageSource without a value): then the row
+    // is exactly 0.0 + v either way.
+    void setVoltageSourceForStep(VoltageSource *vs, double v);
     // indicate that the values on the left side of row change in doStep() (no-ops)
     void stampNonLinear(const NodeRef &) {}
     void stampNonLinearVS(VoltageSource *) {}

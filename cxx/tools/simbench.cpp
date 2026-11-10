@@ -35,6 +35,8 @@
 //   --profile     time each phase of runCircuit() with the CPU's time-stamp counter
 //   --blame       list the elements that most often report "not converged yet"
 //   --elements    time doStep() per element class (adds ~20 cycles per call)
+//   --sample      sampling profiler: hot functions and source lines (Windows; needs the PDB, so
+//                 build with /Zi, e.g. build-prof; see tools/Sampler.h)
 //   --dense-lu    use only DenseLU's dense path (to compare it with the sparse one)
 //   --wires-every-step  work out wire currents every step, as a scope showing a wire makes the app do
 //   --watch-wires N  pretend scopes watch every Nth wire; prints a hash of their currents at every
@@ -57,6 +59,7 @@
 #include "core/CircuitElm.h"
 #include "core/CircuitLoader.h"
 #include "core/CycleCounter.h"
+#include "Sampler.h"
 #include "core/DenseLU.h"
 #include "core/ElementFactory.h"
 #include "core/SimApp.h"
@@ -166,6 +169,7 @@ int main(int argc, char **argv) {
     long maxSteps = 0;  // --steps N; 0 = no limit
     bool refEngine = false, quiet = false, verbose = false, profile = false, blame = false, elements = false;
     bool wiresEveryStep = false;
+    bool sample = false;
     int watchEvery = 0;  // --watch-wires N: watch every Nth wire-equivalent element
     int frameSteps = 1000;
     for (int i = 2; i < argc; i++) {
@@ -187,6 +191,8 @@ int main(int argc, char **argv) {
             blame = true;
         else if (!std::strcmp(argv[i], "--elements"))
             elements = true;
+        else if (!std::strcmp(argv[i], "--sample"))
+            sample = true;
         else if (!std::strcmp(argv[i], "--dense-lu"))
             DenseLU::sparseEnabled = false;  // fast engine with only the dense LU path
         else if (!std::strcmp(argv[i], "--wires-every-step"))
@@ -270,6 +276,9 @@ int main(int argc, char **argv) {
     if (elements)
         sim.doStepTicks = &elmTicks;
     const long stepsAtStart = app.steps;
+    Sampler sampler;
+    if (sample)
+        sampler.start();
     uint64_t startTicks = cycleCount();
     auto start = std::chrono::steady_clock::now();
     auto wall = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); };
@@ -295,6 +304,7 @@ int main(int argc, char **argv) {
         }
     }
     double elapsed = wall();
+    sampler.stop();
     const int64_t steps = app.steps - stepsAtStart;
     // calibrate the time-stamp counter against the wall clock over the whole run
     double ticksPerSecond = (double) (cycleCount() - startTicks) / elapsed;
@@ -355,6 +365,8 @@ int main(int argc, char **argv) {
                         ce->getClassName().c_str(), ce->x, ce->y);
         }
     }
+    if (sample)
+        sampler.report();
     if (elements) {
         struct ClassTotal {
             std::string name;

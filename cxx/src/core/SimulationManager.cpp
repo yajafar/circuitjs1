@@ -28,6 +28,7 @@
 #include <iostream>
 
 #include "CircuitElm.h"
+#include "FloatBits.h"
 #include "JsNumber.h"
 #include "SimApp.h"
 #include "../elements/GroundElm.h"
@@ -945,6 +946,10 @@ void SimulationManager::stampCircuit() {
             maxMatrixSize = m.size;
         m.origRightSide = m.rightSide;
         m.origMatrix = m.matrix;
+        // from here on matrix == origMatrix and rightSide == origRightSide, and the fast engine
+        // keeps track of what changes (see CircuitMatrix::restoreDirty())
+        m.trackDirty = fastEngine;
+        m.rightSideDirty = false;
     }
     // determine which solver to use (AUTO uses the largest matrix size to decide)
     if (solverType == SOLVER_SPARSE)
@@ -979,7 +984,7 @@ void SimulationManager::stampCircuit() {
     stepFinishedList.clear();
     for (CircuitElm *ce : elmArr) {
         unsigned hooks = ce->overriddenHooks();
-        if (hooks & HOOK_DO_STEP)
+        if ((hooks & HOOK_DO_STEP) && !(fastEngine && ce->skipsDoStep()))
             doStepList.push_back(ce);
         if (hooks & HOOK_START_ITERATION)
             startIterationList.push_back(ce);
@@ -1209,7 +1214,7 @@ void SimulationManager::updateVoltageSource(const NodeRef &, const NodeRef &, Vo
 
 void SimulationManager::stampResistor(const NodeRef &n1, const NodeRef &n2, double r) {
     double r0 = 1 / r;
-    if (std::isnan(r0) || std::isinf(r0)) {
+    if (floatbits::isNaN(r0) || floatbits::isInf(r0)) {
         console("bad resistance " + jsNumberToString(r) + " " + jsNumberToString(r0));
         return;
     }
@@ -1245,7 +1250,7 @@ void SimulationManager::stampCCCS(const NodeRef &n1, const NodeRef &n2, VoltageS
 }
 
 void SimulationManager::stampMatrix(const NodeRef &i, const NodeRef &j, double x) {
-    if (!std::isfinite(x))
+    if (!floatbits::isFinite(x))
         console("stampMatrix: non-finite value");
     if (i->row > 0 && j->row > 0) {
         if (i->matrix != j->matrix)
@@ -1256,7 +1261,7 @@ void SimulationManager::stampMatrix(const NodeRef &i, const NodeRef &j, double x
 }
 
 void SimulationManager::stampMatrixNV(VoltageSource *i, const NodeRef &j, double x) {
-    if (!std::isfinite(x))
+    if (!floatbits::isFinite(x))
         console("stampMatrixNV: non-finite value");
     if (j->row > 0) {
         if (i->matrix != j->matrix)
@@ -1266,7 +1271,7 @@ void SimulationManager::stampMatrixNV(VoltageSource *i, const NodeRef &j, double
 }
 
 void SimulationManager::stampMatrixVN(const NodeRef &i, VoltageSource *j, double x) {
-    if (!std::isfinite(x))
+    if (!floatbits::isFinite(x))
         console("stampMatrixVN: non-finite value");
     if (i->row > 0) {
         if (i->matrix != j->matrix)
@@ -1276,7 +1281,7 @@ void SimulationManager::stampMatrixVN(const NodeRef &i, VoltageSource *j, double
 }
 
 void SimulationManager::stampMatrixVV(VoltageSource *i, VoltageSource *j, double x) {
-    if (!std::isfinite(x))
+    if (!floatbits::isFinite(x))
         console("stampMatrixVV: non-finite value");
     if (i->matrix != j->matrix)
         console("stampMatrix cross-matrix! vs row " + std::to_string(i->row) + " vs vs row " + std::to_string(j->row));
@@ -1284,12 +1289,20 @@ void SimulationManager::stampMatrixVV(VoltageSource *i, VoltageSource *j, double
 }
 
 void SimulationManager::stampRightSide(const NodeRef &n, double x) {
-    if (n->row > 0)
+    if (n->row > 0) {
         n->matrix->rightSide[n->row - 1] += x;
+        n->matrix->rightSideDirty = true;
+    }
+}
+
+void SimulationManager::setVoltageSourceForStep(VoltageSource *vs, double v) {
+    vs->matrix->origRightSide[vs->row - 1] = 0.0 + v;
+    vs->matrix->rightSideDirty = true;
 }
 
 void SimulationManager::stampRightSideVS(VoltageSource *vs, double x) {
     vs->matrix->rightSide[vs->row - 1] += x;
+    vs->matrix->rightSideDirty = true;
 }
 
 void SimulationManager::runCircuit(bool didAnalyze) {
@@ -1378,12 +1391,18 @@ void SimulationManager::runCircuit(bool didAnalyze) {
             stats.subIterations++;
             for (auto &mp : matrices) {
                 CircuitMatrix &m = *mp;
+                if (fastEngine) {
+                    // put back only what changed (the fast engine's DenseLU leaves m.matrix alone)
+                    m.restoreRightSide();
+                    if (m.nonLinear)
+                        m.restoreDirty();
+                    continue;
+                }
                 for (int i = 0; i != m.size; i++)
                     m.rightSide[i] = m.origRightSide[i];
                 if (m.nonLinear) {
-                    if (usingSparse || fastEngine) {
-                        // the sparse lu_factor and the fast engine's DenseLU leave m.matrix
-                        // alone, so only stamped entries can differ
+                    if (usingSparse) {
+                        // the sparse lu_factor leaves m.matrix alone, so only stamped entries can differ
                         for (int k : m.stamped)
                             m.matrix[k % m.size][k / m.size] = m.origMatrix[k % m.size][k / m.size];
                     } else {
@@ -1438,7 +1457,7 @@ void SimulationManager::runCircuit(bool didAnalyze) {
                     for (int j = 0; j != m.size; j++) {
                         for (int i = 0; i != m.size; i++) {
                             double x = m.matrix[i][j];
-                            if (std::isnan(x) || std::isinf(x)) {
+                            if (floatbits::isNaN(x) || floatbits::isInf(x)) {
                                 stop("nan/infinite matrix!", nullptr);
                                 console("matrix " + std::to_string(mi) + " [" + std::to_string(i) + "][" +
                                         std::to_string(j) + "] is " + jsNumberToString(x));
@@ -1484,10 +1503,11 @@ void SimulationManager::runCircuit(bool didAnalyze) {
                         m.lastRightSide = m.rightSide;  // lu_solve() overwrites it with the solution
                 }
                 lu_solve(m.matrix, m.size, m.permute, m.rightSide, m);
+                m.rightSideDirty = true;  // rightSide now holds the solution, not the input
                 if (fastEngine && !usingSparse) {
                     m.lastSolveHadNaN = false;
                     for (int i = 0; i != m.size; i++)
-                        if (std::isnan(m.rightSide[i]))
+                        if (floatbits::isNaN(m.rightSide[i]))
                             m.lastSolveHadNaN = true;
                     m.lastRightSideValid = true;
                 }
@@ -1582,7 +1602,7 @@ void SimulationManager::runCircuit(bool didAnalyze) {
 void SimulationManager::applySolvedRightSide(CircuitMatrix &m) {
     for (int j = 0; j != m.size; j++) {
         double res = m.rightSide[j];
-        if (std::isnan(res)) {
+        if (floatbits::isNaN(res)) {
             converged = false;
             break;
         }
@@ -1592,7 +1612,7 @@ void SimulationManager::applySolvedRightSide(CircuitMatrix &m) {
     // set currents for voltage sources in this matrix
     for (VoltageSource *vs : m.voltageSourceList) {
         double res = m.rightSide[vs->row - 1];
-        if (!std::isnan(res))
+        if (!floatbits::isNaN(res))
             vs->elm->setCurrent(vs, res);
     }
     setNodeVoltages(m, m.nodeVoltages);

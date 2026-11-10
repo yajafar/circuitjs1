@@ -21,6 +21,7 @@
 
 #include <cmath>
 
+#include "../core/FloatBits.h"
 #include "../core/JsMath.h"
 #include "../core/CircuitXMLDeserializer.h"
 #include "../core/CircuitXMLSerializer.h"
@@ -341,7 +342,7 @@ void TransistorElm::doStep() {
     double gm = (gex - (cex - cbc) * dqbdve / qb) / qb - go;
     double ceqbe = pnp * (cc + cb - vbe * (gm + go + gpi) + vbc * go);
     double ceqbc = pnp * (-cc + vbe * (gm + go) - vbc * (gmu + go));
-    if (!std::isfinite(ib) || std::isnan(ic))
+    if (!floatbits::isFinite(ib) || floatbits::isNaN(ic))
         sim->stop("infinite transistor current", this);
     // stamp matrix.
     // Node 0 is the base, node 1 the collector, node 2 the emitter.

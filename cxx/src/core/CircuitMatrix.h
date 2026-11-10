@@ -73,6 +73,38 @@ public:
     // (not in TS) fast engine: this frozen matrix already passed runCircuit()'s NaN/inf check
     bool passedFiniteCheck = false;
 
+    // (not in TS) fast engine: before each sub-iteration runCircuit() puts matrix and rightSide back
+    // to origMatrix and origRightSide, then the nonlinear elements stamp again.  The reference
+    // engine copies everything; here only what changed is put back:
+    // - dirty lists the entries stamped since matrix last equalled origMatrix, as (row, col).  A
+    //   nonlinear element stamps a few entries per sub-iteration, while the stamped list holds every
+    //   entry of the matrix.  Tracked from the end of stampCircuit() on, when the two are equal.
+    // - rightSideDirty says rightSide may differ from origRightSide: something stamped it, a solve
+    //   overwrote it with the solution, or an element changed origRightSide (see
+    //   SimulationManager::setVoltageSourceForStep()).
+    struct Entry {
+        int row, col;
+    };
+    std::vector<Entry> dirty;
+    bool trackDirty = false;
+    bool rightSideDirty = true;
+
+    void restoreDirty() {
+        for (const Entry &e : dirty) {
+            matrix[e.row][e.col] = origMatrix[e.row][e.col];
+            stampedFlags[(size_t) e.col * size + e.row] &= (unsigned char) ~DIRTY;
+        }
+        dirty.clear();
+    }
+
+    void restoreRightSide() {
+        if (!rightSideDirty)
+            return;
+        for (int i = 0; i != size; i++)
+            rightSide[i] = origRightSide[i];
+        rightSideDirty = false;
+    }
+
     void clear() {
         matrix.assign(size, std::vector<double>(size, 0.0));
         origMatrix.assign(size, std::vector<double>(size, 0.0));
@@ -82,6 +114,9 @@ public:
         frozen = frozenStamped = false;
         lastRightSideValid = false;
         passedFiniteCheck = false;
+        dirty.clear();
+        trackDirty = false;
+        rightSideDirty = true;
         denseLU.invalidate();  // the stamped list starts over
     }
 
@@ -92,13 +127,20 @@ public:
         }
         matrix[row][col] += x;
         size_t k = (size_t) col * size + row;
-        if (!stampedFlags[k]) {
-            stampedFlags[k] = 1;
+        unsigned char &f = stampedFlags[k];
+        if (!(f & STAMPED)) {
+            f |= STAMPED;
             stamped.push_back((int) k);
             stampedSorted = false;
+        }
+        if (trackDirty && !(f & DIRTY)) {
+            f |= DIRTY;
+            dirty.push_back({row, col});
         }
     }
 
 private:
+    static constexpr unsigned char STAMPED = 1;  // entry is in the stamped list
+    static constexpr unsigned char DIRTY = 2;    // entry is in the dirty list
     std::vector<unsigned char> stampedFlags;
 };

@@ -43,6 +43,7 @@ class XmlElement;
 class CircuitXMLDeserializer;
 struct WireSegment;
 class WireRouter;
+class ChipElm;
 
 // every concrete element class puts this in its body; it stands in for constructor.name.
 // (not in TS) It also reports which per-timestep hooks the class overrides; see elmHooks().
@@ -56,6 +57,7 @@ enum : unsigned {
     HOOK_START_ITERATION = 2,
     HOOK_STEP_FINISHED = 4,
     HOOK_CALCULATE_CURRENT = 8,
+    HOOK_CHIP_STEP = 16,  // doStep() and startIteration() are ChipElm's own (see ChipElm::stamp())
     HOOK_ALL = 15,
 };
 
@@ -144,6 +146,8 @@ public:
     // this class overrides (HOOK_* bits); the rest are CircuitElm's empty versions, which the
     // fast engine doesn't need to call.  ELM_CLASS fills it in; a class without it says "all".
     virtual unsigned overriddenHooks() const { return HOOK_ALL; }
+    // (not in TS) fast engine: true if doStep() has nothing to do and need not be called
+    virtual bool skipsDoStep() const { return false; }
     virtual int getDumpType() { return 0; }
     virtual std::string getXmlDumpType();
     // class name to register this element's dump type under (DCVoltageElm uses VoltageElm's)
@@ -513,5 +517,8 @@ unsigned elmHooks() {
         h |= HOOK_STEP_FINISHED;
     if (!std::is_same_v<decltype(&T::calculateCurrent), Hook>)
         h |= HOOK_CALCULATE_CURRENT;
+    using ChipHook = void (ChipElm::*)();
+    if (std::is_same_v<decltype(&T::doStep), ChipHook> && std::is_same_v<decltype(&T::startIteration), ChipHook>)
+        h |= HOOK_CHIP_STEP;
     return h;
 }

@@ -76,6 +76,10 @@ target_link_libraries(lutest circuitcore)
 # headless benchmark: simulated seconds per wall second, plus 7-segment display readout
 add_executable(simbench tools/simbench.cpp)
 target_link_libraries(simbench circuitcore)
+if(WIN32)
+    # the sampling profiler (tools/Sampler.h): dbghelp reads the PDB, winmm sets the timer resolution
+    target_link_libraries(simbench dbghelp winmm)
+endif()
 add_executable(exprtest tools/exprtest.cpp)
 target_link_libraries(exprtest circuitcore)
 

@@ -375,6 +375,11 @@ void ChipElm::stamp() {
     }
     if (vsc != getVoltageSourceCount())
         SimulationManager::console("voltage source count does not match number of outputs");
+    // (not in TS) Output voltages can be set once per step (see startIteration()) when this class
+    // adds nothing to doStep() and startIteration(), and its sources are the ones stamped above,
+    // each owning its row, which stampVoltageSource() left at +0.0.  A class that overrides
+    // stamp() without calling this keeps the flag false and the reference behavior.
+    outputsPerStep = sim->fastEngine && (overriddenHooks() & HOOK_CHIP_STEP);
 }
 
 void ChipElm::startIteration() {
@@ -395,10 +400,24 @@ void ChipElm::startIteration() {
         justLoaded = false;
     else
         execute();
+
+    // (not in TS) The outputs only change here, once per timestep, so the fast engine sets each
+    // output's voltage for the whole step now and doStep() has nothing left to do.
+    if (outputsPerStep) {
+        const int n = getPostCount();
+        for (int i = 0; i != n; i++) {
+            Pin &p = pins[i];
+            if (p.output && p.voltSource != nullptr)
+                sim->setVoltageSourceForStep(p.voltSource, p.value ? highVoltage : 0);
+        }
+    }
 }
 
 void ChipElm::doStep() {
-    for (int i = 0; i != getPostCount(); i++) {
+    if (outputsPerStep)
+        return;  // startIteration() did it
+    const int n = getPostCount();
+    for (int i = 0; i != n; i++) {
         Pin &p = pins[i];
         if (p.output)
             sim->updateVoltageSource(CircuitNode::ground, nodes[i], p.voltSource, p.value ? highVoltage : 0);
